@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+*.pkg.tar.*
+*.AppImage
+pkg/
+src/

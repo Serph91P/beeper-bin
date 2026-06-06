@@ -1,0 +1,163 @@
+name: beeper-v4 aur auto update
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'AUR package name to update'
+        required: false
+        default: 'beeper-bin'
+      query_url:
+        description: 'Upstream download endpoint'
+        required: false
+        default: 'https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop'
+      version_regex:
+        description: 'Regex to extract version from resolved download URL'
+        required: false
+        default: 'Beeper-(?P<version>[0-9]+\.[0-9]+\.[0-9]+)'
+      run_build:
+        description: 'Run makepkg build and namcap checks'
+        required: false
+        default: true
+        type: boolean
+      push:
+        description: 'Push PKGBUILD and .SRCINFO to AUR via SSH'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  aur_update:
+    name: Update and publish AUR package
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          pacman -Syu --noconfirm --needed --quiet
+          pacman -S --noconfirm --needed --quiet base-devel git openssh python namcap
+          useradd -m -s /bin/bash aurbuild
+          chown -R aurbuild:aurbuild "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Run unit tests
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          python3 -m unittest discover -s tests -v
+
+      - name: Resolve workflow inputs
+        id: resolve
+        run: |
+          PACKAGE_NAME="${{ github.event.inputs.package_name }}"
+          if [ -z "$PACKAGE_NAME" ]; then
+            PACKAGE_NAME="${{ vars.AUR_PACKAGE_NAME }}"
+          fi
+          if [ -z "$PACKAGE_NAME" ]; then
+            PACKAGE_NAME="beeper-bin"
+          fi
+
+          QUERY_URL="${{ github.event.inputs.query_url }}"
+          if [ -z "$QUERY_URL" ]; then
+            QUERY_URL="${{ vars.UPSTREAM_QUERY_URL }}"
+          fi
+          if [ -z "$QUERY_URL" ]; then
+            QUERY_URL="https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop"
+          fi
+
+          VERSION_REGEX="${{ github.event.inputs.version_regex }}"
+          if [ -z "$VERSION_REGEX" ]; then
+            VERSION_REGEX="${{ vars.UPSTREAM_VERSION_REGEX }}"
+          fi
+          if [ -z "$VERSION_REGEX" ]; then
+            VERSION_REGEX="Beeper-(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+)"
+          fi
+
+          BUILD="${{ github.event.inputs.run_build }}"
+          if [ -z "$BUILD" ]; then
+            BUILD="true"
+          fi
+
+          PUSH="${{ github.event.inputs.push }}"
+          if [ -z "$PUSH" ]; then
+            PUSH="true"
+          fi
+
+          echo "AUR_PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_ENV"
+          echo "UPSTREAM_QUERY_URL=$QUERY_URL" >> "$GITHUB_ENV"
+          echo "UPSTREAM_VERSION_REGEX=$VERSION_REGEX" >> "$GITHUB_ENV"
+          echo "RUN_BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "PUSH_TO_AUR=$PUSH" >> "$GITHUB_ENV"
+
+      - name: Run update script as unprivileged user
+        id: update
+        run: |
+          runuser -u aurbuild --preserve-environment -- bash -lc '
+            cd "$GITHUB_WORKSPACE"
+            python3 scripts/aur_update.py \
+              --json \
+              --package-name "$AUR_PACKAGE_NAME" \
+              --query-url "$UPSTREAM_QUERY_URL" \
+              --version-regex "$UPSTREAM_VERSION_REGEX" > /tmp/aur-update.json
+          '
+          cat /tmp/aur-update.json
+
+      - name: Parse update result
+        id: result
+        run: |
+          CHANGED=$(python3 -c "import json; payload=json.load(open('/tmp/aur-update.json', 'r', encoding='utf-8')); print('true' if payload.get('changed') else 'false')")
+          VERSION=$(python3 -c "import json; payload=json.load(open('/tmp/aur-update.json', 'r', encoding='utf-8')); print(payload.get('new_pkgver'))")
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build and run checks as unprivileged user
+        if: steps.result.outputs.changed == 'true' && env.RUN_BUILD == 'true'
+        run: |
+          runuser -u aurbuild --preserve-environment -- bash -lc '
+            cd "$GITHUB_WORKSPACE/packages/$AUR_PACKAGE_NAME"
+            bash -n PKGBUILD
+            namcap PKGBUILD || true
+            makepkg -s --noconfirm --needed --check
+            namcap ./*.pkg.tar.* || true
+          '
+
+      - name: Commit package update back to GitHub
+        if: steps.result.outputs.changed == 'true'
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.email "actions@github.com"
+          git config user.name "AUR Update Bot"
+          git add "packages/$AUR_PACKAGE_NAME/PKGBUILD" "packages/$AUR_PACKAGE_NAME/.SRCINFO"
+          if git diff --cached --quiet; then
+            echo "No GitHub changes to commit."
+            exit 0
+          fi
+          git commit -m "$AUR_PACKAGE_NAME: update to ${{ steps.result.outputs.version }}"
+          git push
+
+      - name: Push update to AUR
+        if: steps.result.outputs.changed == 'true' && env.PUSH_TO_AUR == 'true'
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_SSH_KNOWN_HOSTS: ${{ secrets.AUR_SSH_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$AUR_SSH_KEY" ]; then
+            echo "Missing AUR_SSH_KEY secret. Skipping AUR push."
+            exit 0
+          fi
+          if [ -z "$AUR_SSH_KNOWN_HOSTS" ]; then
+            echo "Missing AUR_SSH_KNOWN_HOSTS secret. Refusing insecure AUR push."
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE"
+          python3 scripts/publish_aur.py \
+            --package-name "$AUR_PACKAGE_NAME" \
+            --package-ver "${{ steps.result.outputs.version }}"
