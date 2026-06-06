@@ -54,6 +54,35 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertEqual(old, ("old",))
         self.assertEqual(lines[0], "source=('new-value')\n")
 
+    def test_detect_upstream_from_update_feed_json(self):
+        feed_url = "https://api.beeper.com/desktop/update-feed.json?channel=nightly"
+        payload = {
+            "version": "4.2.908",
+            "url": "https://beeper-desktop.download.beeper.com/builds/Beeper-Nightly-4.2.908-x86_64.AppImage",
+        }
+
+        def fake_feed(url, timeout):
+            self.assertEqual(url, feed_url)
+            return payload
+
+        def fake_hash(url, timeout):
+            self.assertEqual(url, payload["url"])
+            return "b2aa"
+
+        old_feed = aur_update._fetch_update_feed
+        old_hash = aur_update._hash_streamed
+        try:
+            aur_update._fetch_update_feed = fake_feed
+            aur_update._hash_streamed = fake_hash
+            pkgver, source, sha256 = aur_update.detect_upstream(feed_url, r"Beeper-(?P<version>[0-9.]+)", 30)
+        finally:
+            aur_update._fetch_update_feed = old_feed
+            aur_update._hash_streamed = old_hash
+
+        self.assertEqual(pkgver, "4.2.908")
+        self.assertEqual(source, "Beeper-4.2.908-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-Nightly-4.2.908-x86_64.AppImage")
+        self.assertEqual(sha256, "b2aa")
+
     def test_publish_no_changes_returns_success_exit_code(self):
         self.assertEqual(publish_aur.exit_code_for_result({"pushed": False, "reason": "No local changes for AUR package"}), 0)
 

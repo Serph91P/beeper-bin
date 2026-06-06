@@ -14,8 +14,8 @@ Das existierende Paket `beeper-v4-bin` gehoert aktuell einem anderen Maintainer.
 
 Taeglich um 03:00 UTC und manuell per `workflow_dispatch`:
 
-1. Beeper Stable Download-Endpunkt aufloesen.
-2. Version aus dem finalen AppImage-Dateinamen lesen, zum Beispiel `Beeper-4.2.892-x86_64.AppImage`.
+1. Beeper Update-Feed fuer die neueste Linux-x64 Nightly-Version abfragen.
+2. Version und Asset-URL aus dem Update-Feed lesen, zum Beispiel `Beeper-Nightly-4.2.908-x86_64.AppImage`.
 3. SHA256 ueber das AppImage berechnen.
 4. `PKGBUILD` aktualisieren.
 5. `.SRCINFO` mit `makepkg --printsrcinfo` aktualisieren.
@@ -46,7 +46,7 @@ Nicht blind kopieren, Host-Key gegen eine vertrauenswuerdige Quelle pruefen. Der
 ## Optionale GitHub Variables
 
 - `AUR_PACKAGE_NAME`, Default `beeper-bin`
-- `UPSTREAM_QUERY_URL`, Default `https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop`
+- `UPSTREAM_QUERY_URL`, Default `https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=nightly`
 - `UPSTREAM_VERSION_REGEX`, Default `Beeper-(?P<version>[0-9]+\.[0-9]+\.[0-9]+)`
 
 ## Manuell testen
@@ -92,14 +92,14 @@ Dann muss auch `packages/beeper-v4-bin/` gepflegt werden und dein AUR SSH Key mu
 
 ## Aktuelle Initialversion
 
-Initialisiert mit Beeper `4.2.892` und SHA256:
+Initialisiert und aktualisiert auf Beeper Nightly `4.2.908` und SHA256:
 
 ```text
-9135f456b7c96fb52743a2557d12208cb948b038330d58139f1eedc2560c7fd9
+b2aa7d8dd98df3cdf0d9f3bdb8f9888e929cc25221705ad2c23b245bb9d53d3b
 ```
 
 Quelle:
 
 ```text
-https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop
+https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=nightly
 ```

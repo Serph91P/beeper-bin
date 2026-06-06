@@ -26,6 +26,16 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+DEFAULT_UPSTREAM_QUERY_URL = (
+    "https://api.beeper.com/desktop/update-feed.json"
+    "?bundleID=com.automattic.beeper.desktop"
+    "&version=0.0.1"
+    "&platform=linux"
+    "&arch=x64"
+    "&channel=nightly"
+)
+
+
 UA = "beeper-aur-auto-updater/1.0"
 
 
@@ -82,11 +92,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--query-url",
-        default=os.getenv(
-            "UPSTREAM_QUERY_URL",
-            "https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop",
+        default=os.getenv("UPSTREAM_QUERY_URL", DEFAULT_UPSTREAM_QUERY_URL),
+        help=(
+            "URL for Beeper's update-feed JSON or a download endpoint that resolves "
+            "to the latest binary artifact"
         ),
-        help="URL that resolves to latest binary artifact and contains version in its filename",
     )
     parser.add_argument(
         "--version-regex",
@@ -185,6 +195,27 @@ def _fetch_final_url(url: str, timeout: int = 30) -> str:
         except URLError:
             continue
     raise RuntimeError(f"Could not resolve final URL for {url}")
+
+
+def _fetch_update_feed(url: str, timeout: int = 30) -> dict[str, object] | None:
+    """Return Beeper update-feed JSON when query_url points at the feed."""
+    if "/desktop/update-feed" not in url:
+        return None
+    request = Request(url, headers={"User-Agent": UA}, method="GET")
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+    if not raw.strip():
+        raise RuntimeError(f"Beeper update feed returned no data for {url}")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Beeper update feed did not return a JSON object")
+    if not payload.get("version") or not payload.get("url"):
+        raise RuntimeError(f"Beeper update feed missing version/url: {payload}")
+    return payload
+
+
+def _canonical_appimage_name(pkgver: str) -> str:
+    return f"Beeper-{pkgver}-x86_64.AppImage"
 
 
 def _extract_version_from_url(url: str, version_regex: str) -> str:
@@ -373,10 +404,16 @@ def detect_upstream(
     timeout: int,
 ) -> tuple[str, str, str]:
     """Return (pkgver, source_spec, sha256)."""
-    pkgver, source_url = _detect_upstream(query_url, regex, timeout)
+    update_feed = _fetch_update_feed(query_url, timeout)
+    if update_feed:
+        pkgver = str(update_feed["version"])
+        source_url = str(update_feed["url"])
+    else:
+        pkgver, source_url = _detect_upstream(query_url, regex, timeout)
+
     sha256sum = _hash_streamed(source_url, timeout=timeout)
-    filename = Path(source_url).name or f"Beeper-{pkgver}-x86_64.AppImage"
-    return pkgver, f"{filename}::{query_url}", sha256sum
+    filename = _canonical_appimage_name(pkgver)
+    return pkgver, f"{filename}::{source_url}", sha256sum
 
 
 def has_git_changes(path: Path) -> bool:
