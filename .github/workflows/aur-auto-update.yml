@@ -1,4 +1,4 @@
-name: beeper-v4 aur auto update
+name: beeper-bin aur auto update
 
 on:
   schedule:
@@ -26,6 +26,11 @@ on:
         description: 'Push PKGBUILD and .SRCINFO to AUR via SSH'
         required: false
         default: true
+        type: boolean
+      force_publish:
+        description: 'Publish to AUR even when upstream metadata did not change'
+        required: false
+        default: false
         type: boolean
 
 jobs:
@@ -91,11 +96,17 @@ jobs:
             PUSH="true"
           fi
 
+          FORCE_PUBLISH="${{ github.event.inputs.force_publish }}"
+          if [ -z "$FORCE_PUBLISH" ]; then
+            FORCE_PUBLISH="false"
+          fi
+
           echo "AUR_PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_ENV"
           echo "UPSTREAM_QUERY_URL=$QUERY_URL" >> "$GITHUB_ENV"
           echo "UPSTREAM_VERSION_REGEX=$VERSION_REGEX" >> "$GITHUB_ENV"
           echo "RUN_BUILD=$BUILD" >> "$GITHUB_ENV"
           echo "PUSH_TO_AUR=$PUSH" >> "$GITHUB_ENV"
+          echo "FORCE_PUBLISH=$FORCE_PUBLISH" >> "$GITHUB_ENV"
 
       - name: Run update script as unprivileged user
         id: update
@@ -119,7 +130,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build and run checks as unprivileged user
-        if: steps.result.outputs.changed == 'true' && env.RUN_BUILD == 'true'
+        if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true') && env.RUN_BUILD == 'true' }}
         run: |
           runuser -u aurbuild --preserve-environment -- bash -lc '
             cd "$GITHUB_WORKSPACE/packages/$AUR_PACKAGE_NAME"
@@ -144,7 +155,7 @@ jobs:
           git push
 
       - name: Push update to AUR
-        if: steps.result.outputs.changed == 'true' && env.PUSH_TO_AUR == 'true'
+        if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true') && env.PUSH_TO_AUR == 'true' }}
         env:
           AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
           AUR_SSH_KNOWN_HOSTS: ${{ secrets.AUR_SSH_KNOWN_HOSTS }}
