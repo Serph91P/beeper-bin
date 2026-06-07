@@ -59,7 +59,7 @@ jobs:
           useradd -m -s /bin/bash aurbuild
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Prepare workspace permissions
         run: |
