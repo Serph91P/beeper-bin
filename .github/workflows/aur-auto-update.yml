@@ -43,14 +43,26 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install toolchain
         run: |
           pacman -Syu --noconfirm --needed --quiet
-          pacman -S --noconfirm --needed --quiet base-devel git openssh python namcap
+          pacman -S --noconfirm --needed --quiet \
+            base-devel \
+            git \
+            hicolor-icon-theme \
+            libappindicator-gtk3 \
+            libnotify \
+            libsecret \
+            namcap \
+            openssh \
+            python
           useradd -m -s /bin/bash aurbuild
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare workspace permissions
+        run: |
           chown -R aurbuild:aurbuild "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -133,11 +145,18 @@ jobs:
         if: ${{ (steps.result.outputs.changed == 'true' || env.FORCE_PUBLISH == 'true') && env.RUN_BUILD == 'true' }}
         run: |
           runuser -u aurbuild --preserve-environment -- bash -lc '
+            set -euo pipefail
             cd "$GITHUB_WORKSPACE/packages/$AUR_PACKAGE_NAME"
             bash -n PKGBUILD
             namcap PKGBUILD || true
             makepkg -s --noconfirm --needed --check
-            namcap ./*.pkg.tar.* || true
+            shopt -s nullglob
+            packages=(./*.pkg.tar.*)
+            if [ ${#packages[@]} -eq 0 ]; then
+              echo "No package artifact was built."
+              exit 1
+            fi
+            namcap "${packages[@]}" || true
           '
 
       - name: Commit package update back to GitHub
