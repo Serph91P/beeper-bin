@@ -6,9 +6,9 @@ _install_path='opt'
 
 pkgname='beeper-bin'
 pkgver=4.2.909
-pkgrel=2
+pkgrel=3
 pkgdesc='The ultimate messaging app'
-depends=('libappindicator-gtk3' 'libnotify' 'libsecret' 'hicolor-icon-theme')
+depends=('libappindicator' 'libnotify' 'libsecret' 'hicolor-icon-theme')
 url='https://www.beeper.com/beta'
 license=('LicenseRef-beeper')
 arch=('x86_64')
@@ -68,8 +68,6 @@ _package_beeper() {
 }
 
 package() {
-  depends+=('hicolor-icon-theme')
-
   install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/beeper.desktop" << END
 [Desktop Entry]
 Type=Application
