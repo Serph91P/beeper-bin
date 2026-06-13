@@ -44,6 +44,22 @@ class PublishSecurityTests(unittest.TestCase):
         self.assertNotIn("StrictHostKeyChecking=no", command)
 
 
+class PkgbuildDesktopRegistrationTests(unittest.TestCase):
+    def test_beeper_bin_extracts_app_asar_before_patching_linux_config(self):
+        pkgbuild = (REPO / "packages" / "beeper-bin" / "PKGBUILD").read_text(encoding="utf-8")
+
+        self.assertIn("app.asar", pkgbuild)
+        self.assertIn("asar extract", pkgbuild)
+        self.assertIn('asar extract "$_asar_path" "$_app_dir" || return 1', pkgbuild)
+        self.assertLess(pkgbuild.index("asar extract"), pkgbuild.index("registerLinuxConfig"))
+
+    def test_beeper_bin_fails_build_if_linux_config_patch_target_is_missing(self):
+        pkgbuild = (REPO / "packages" / "beeper-bin" / "PKGBUILD").read_text(encoding="utf-8")
+
+        self.assertNotIn("skipping patch", pkgbuild)
+        self.assertRegex(pkgbuild, r"(?s)could not find file exporting registerLinuxConfig.*return 1")
+
+
 class UpdateParsingTests(unittest.TestCase):
     def test_replace_array_preserves_single_quoted_pkgbuild_style(self):
         lines = ["source=('old')\n", "sha256sums=('0')\n"]

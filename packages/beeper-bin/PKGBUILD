@@ -6,9 +6,10 @@ _install_path='opt'
 
 pkgname='beeper-bin'
 pkgver=4.2.927
-pkgrel=3
+pkgrel=4
 pkgdesc='The ultimate messaging app'
 depends=('libappindicator' 'libnotify' 'libsecret' 'hicolor-icon-theme')
+makedepends=('asar')
 url='https://www.beeper.com/beta'
 license=('LicenseRef-beeper')
 arch=('x86_64')
@@ -36,11 +37,18 @@ _package_beeper() {
 
   rm -f "$pkgdir/$_install_path/beeper/beepertexts.desktop"
 
-  local _app_dir="$pkgdir/$_install_path/beeper/resources/app"
+  local _resources_dir="$pkgdir/$_install_path/beeper/resources"
+  local _app_dir="$_resources_dir/app"
+  local _asar_path="$_resources_dir/app.asar"
   local _main_dir="$_app_dir/build/main"
   local _linux_config_file
   local _main_mjs_files
   local _oldnull
+
+  if [ ! -d "$_app_dir" ] && [ -f "$_asar_path" ]; then
+    asar extract "$_asar_path" "$_app_dir" || return 1
+    rm -f "$_asar_path"
+  fi
 
   _linux_config_file=""
 
@@ -60,8 +68,8 @@ _package_beeper() {
   fi
 
   if [ -z "$_linux_config_file" ]; then
-    echo "warning: could not find file exporting registerLinuxConfig in $_app_dir; skipping patch" >&2
-    return 0
+    echo "error: could not find file exporting registerLinuxConfig in $_app_dir" >&2
+    return 1
   fi
 
   sed -i 's/export{[a-zA-Z0-9_]* as registerLinuxConfig};/const noopFunc=function(){};export{noopFunc as registerLinuxConfig};/' "$_linux_config_file"

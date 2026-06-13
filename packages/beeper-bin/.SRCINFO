@@ -1,10 +1,11 @@
 pkgbase = beeper-bin
 	pkgdesc = The ultimate messaging app
 	pkgver = 4.2.927
-	pkgrel = 3
+	pkgrel = 4
 	url = https://www.beeper.com/beta
 	arch = x86_64
 	license = LicenseRef-beeper
+	makedepends = asar
 	depends = libappindicator
 	depends = libnotify
 	depends = libsecret
