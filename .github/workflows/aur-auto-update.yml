@@ -55,6 +55,7 @@ jobs:
             libsecret \
             namcap \
             openssh \
+            asar \
             python
           useradd -m -s /bin/bash aurbuild
 
