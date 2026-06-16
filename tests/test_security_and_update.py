@@ -59,6 +59,12 @@ class PkgbuildDesktopRegistrationTests(unittest.TestCase):
         self.assertNotIn("skipping patch", pkgbuild)
         self.assertRegex(pkgbuild, r"(?s)could not find file exporting registerLinuxConfig.*return 1")
 
+    def test_beeper_bin_preserves_nullglob_state_under_errexit(self):
+        pkgbuild = (REPO / "packages" / "beeper-bin" / "PKGBUILD").read_text(encoding="utf-8")
+
+        self.assertIn("_oldnull=$(shopt -p nullglob || true)", pkgbuild)
+        self.assertNotIn("_oldnull=$(shopt -p nullglob)\n", pkgbuild)
+
 
 class UpdateParsingTests(unittest.TestCase):
     def test_replace_array_preserves_single_quoted_pkgbuild_style(self):

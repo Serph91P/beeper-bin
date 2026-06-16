@@ -53,7 +53,7 @@ _package_beeper() {
   _linux_config_file=""
 
   if [ -d "$_main_dir" ]; then
-    _oldnull=$(shopt -p nullglob)
+    _oldnull=$(shopt -p nullglob || true)
     shopt -s nullglob
     _main_mjs_files=("$_main_dir"/*.mjs)
     eval "$_oldnull"
