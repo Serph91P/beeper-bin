@@ -66,6 +66,175 @@ class PkgbuildDesktopRegistrationTests(unittest.TestCase):
         self.assertNotIn("_oldnull=$(shopt -p nullglob)\n", pkgbuild)
 
 
+class AppImageLayoutInspectionTests(unittest.TestCase):
+    def write_pkgbuild(self, root: Path, makedepends: str = "makedepends=('asar')") -> Path:
+        pkgbuild = root / "PKGBUILD"
+        pkgbuild.write_text(
+            "pkgname='beeper-bin'\n"
+            "pkgver=1\n"
+            "source=('Beeper-1-x86_64.AppImage::https://example.invalid/Beeper.AppImage')\n"
+            "sha256sums=('0')\n"
+            f"{makedepends}\n",
+            encoding="utf-8",
+        )
+        return pkgbuild
+
+    def write_registration_file(self, root: Path, relative: str = "resources/app/build/main/linux-main.mjs") -> Path:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "const real=function(){};\n"
+            "export{real as registerLinuxConfig};\n"
+            "desktop-file-install --dir ~/.local/share/applications\n",
+            encoding="utf-8",
+        )
+        return target
+
+    def test_inspects_unpacked_resources_app_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "squashfs-root"
+            self.write_registration_file(root)
+            pkgbuild = self.write_pkgbuild(Path(tmp))
+
+            inspection = aur_update.validate_appimage_layout(root, pkgbuild)
+
+        self.assertEqual(inspection.layout, "resources/app")
+        self.assertFalse(inspection.requires_asar_makedepend)
+        self.assertEqual(inspection.register_linux_config_targets, ("resources/app/build/main/linux-main.mjs",))
+        self.assertEqual(inspection.desktop_registration_targets, ("resources/app/build/main/linux-main.mjs",))
+
+    def test_inspects_resources_app_asar_layout_via_asar_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "squashfs-root"
+            resources = root / "resources"
+            resources.mkdir(parents=True)
+            app_asar = resources / "app.asar"
+            app_asar.write_text("fake asar", encoding="utf-8")
+            extracted = tmp_path / "fake-extracted-asar"
+            self.write_registration_file(extracted, "build/main/linux-asar.mjs")
+            pkgbuild = self.write_pkgbuild(tmp_path)
+
+            old_extract = aur_update._extract_asar_to_dir
+
+            def fake_extract(asar_path: Path, destination: Path) -> None:
+                self.assertEqual(asar_path, app_asar)
+                import shutil
+
+                shutil.copytree(extracted, destination)
+
+            try:
+                aur_update._extract_asar_to_dir = fake_extract
+                inspection = aur_update.validate_appimage_layout(root, pkgbuild)
+            finally:
+                aur_update._extract_asar_to_dir = old_extract
+
+        self.assertEqual(inspection.layout, "resources/app.asar")
+        self.assertTrue(inspection.requires_asar_makedepend)
+        self.assertEqual(inspection.register_linux_config_targets, ("resources/app.asar:build/main/linux-asar.mjs",))
+
+    def test_fails_when_register_linux_config_target_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "squashfs-root"
+            app = root / "resources" / "app" / "build" / "main"
+            app.mkdir(parents=True)
+            (app / "linux-main.mjs").write_text("console.log('no registration');\n", encoding="utf-8")
+            pkgbuild = self.write_pkgbuild(Path(tmp))
+
+            with self.assertRaisesRegex(RuntimeError, "registerLinuxConfig.*not found"):
+                aur_update.validate_appimage_layout(root, pkgbuild)
+
+    def test_fails_when_multiple_register_linux_config_targets_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "squashfs-root"
+            self.write_registration_file(root, "resources/app/build/main/a.mjs")
+            self.write_registration_file(root, "resources/app/build/main/b.mjs")
+            pkgbuild = self.write_pkgbuild(Path(tmp))
+
+            with self.assertRaisesRegex(RuntimeError, "multiple registerLinuxConfig"):
+                aur_update.validate_appimage_layout(root, pkgbuild)
+
+    def test_app_asar_layout_requires_asar_makedepend_in_pkgbuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "squashfs-root"
+            resources = root / "resources"
+            resources.mkdir(parents=True)
+            app_asar = resources / "app.asar"
+            app_asar.write_text("fake asar", encoding="utf-8")
+            extracted = tmp_path / "fake-extracted-asar"
+            self.write_registration_file(extracted, "build/main/linux-asar.mjs")
+            pkgbuild = self.write_pkgbuild(tmp_path, makedepends="makedepends=('desktop-file-utils')")
+
+            old_extract = aur_update._extract_asar_to_dir
+
+            def fake_extract(asar_path: Path, destination: Path) -> None:
+                import shutil
+
+                shutil.copytree(extracted, destination)
+
+            try:
+                aur_update._extract_asar_to_dir = fake_extract
+                with self.assertRaisesRegex(RuntimeError, "makedepends.*asar"):
+                    aur_update.validate_appimage_layout(root, pkgbuild)
+            finally:
+                aur_update._extract_asar_to_dir = old_extract
+
+    def test_run_inspects_changed_upstream_before_writing_pkgbuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            pkgbuild = self.write_pkgbuild(tmp_path)
+            srcinfo = tmp_path / ".SRCINFO"
+            inspected = []
+
+            old_detect = aur_update.detect_upstream
+            old_inspect = aur_update.inspect_upstream_appimage_source
+            old_generate = aur_update.generate_srcinfo
+            try:
+                aur_update.detect_upstream = lambda query_url, regex, timeout: (
+                    "2",
+                    "Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2.AppImage",
+                    "1",
+                )
+
+                def fake_inspect(source_spec: str, pkgbuild_path: Path, timeout: int):
+                    inspected.append((source_spec, pkgbuild_path, timeout))
+                    current = pkgbuild_path.read_text(encoding="utf-8")
+                    self.assertIn("pkgver=1", current)
+                    return None
+
+                aur_update.inspect_upstream_appimage_source = fake_inspect
+                aur_update.generate_srcinfo = lambda package_dir, srcinfo_command, dry_run: srcinfo.write_text("ok", encoding="utf-8") or True
+                args = argparse.Namespace(
+                    package_name="beeper-bin",
+                    package_dir=tmp_path.as_posix(),
+                    query_url="https://example.invalid/feed.json",
+                    version_regex=r"Beeper-(?P<version>[0-9.]+)",
+                    srcinfo_command="makepkg",
+                    dry_run=False,
+                    json=False,
+                    push=False,
+                    no_push=False,
+                    push_ssh_key="",
+                    ssh_known_hosts="",
+                    aur_remote_template="ssh://aur@aur.archlinux.org/{package}.git",
+                    timeout=7,
+                    commit_email="actions@github.com",
+                    commit_name="AUR Update Bot",
+                    skip_appimage_inspection=False,
+                )
+
+                result, _ = aur_update.run(args)
+            finally:
+                aur_update.detect_upstream = old_detect
+                aur_update.inspect_upstream_appimage_source = old_inspect
+                aur_update.generate_srcinfo = old_generate
+
+        self.assertTrue(result.changed)
+        self.assertEqual(len(inspected), 1)
+        self.assertEqual(inspected[0][0], "Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2.AppImage")
+
+
 class UpdateParsingTests(unittest.TestCase):
     def test_replace_array_preserves_single_quoted_pkgbuild_style(self):
         lines = ["source=('old')\n", "sha256sums=('0')\n"]
