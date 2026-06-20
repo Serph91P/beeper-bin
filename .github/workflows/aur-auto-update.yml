@@ -12,7 +12,7 @@ on:
       query_url:
         description: 'Beeper update-feed JSON or download endpoint'
         required: false
-        default: 'https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=nightly'
+        default: 'https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=stable'
       version_regex:
         description: 'Regex to extract version from resolved download URL'
         required: false
@@ -88,7 +88,7 @@ jobs:
             QUERY_URL="${{ vars.UPSTREAM_QUERY_URL }}"
           fi
           if [ -z "$QUERY_URL" ]; then
-            QUERY_URL="https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=nightly"
+            QUERY_URL="https://api.beeper.com/desktop/update-feed.json?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=stable"
           fi
 
           VERSION_REGEX="${{ github.event.inputs.version_regex }}"

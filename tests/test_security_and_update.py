@@ -77,10 +77,10 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertEqual(lines[0], "source=('new-value')\n")
 
     def test_detect_upstream_from_update_feed_json(self):
-        feed_url = "https://api.beeper.com/desktop/update-feed.json?channel=nightly"
+        feed_url = "https://api.beeper.com/desktop/update-feed.json?channel=stable"
         payload = {
             "version": "4.2.908",
-            "url": "https://beeper-desktop.download.beeper.com/builds/Beeper-Nightly-4.2.908-x86_64.AppImage",
+            "url": "https://beeper-desktop.download.beeper.com/builds/Beeper-4.2.908-x86_64.AppImage",
         }
 
         def fake_feed(url, timeout):
@@ -102,7 +102,7 @@ class UpdateParsingTests(unittest.TestCase):
             aur_update._hash_streamed = old_hash
 
         self.assertEqual(pkgver, "4.2.908")
-        self.assertEqual(source, "Beeper-4.2.908-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-Nightly-4.2.908-x86_64.AppImage")
+        self.assertEqual(source, "Beeper-4.2.908-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-4.2.908-x86_64.AppImage")
         self.assertEqual(sha256, "b2aa")
 
     def test_publish_no_changes_returns_success_exit_code(self):

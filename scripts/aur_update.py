@@ -32,7 +32,7 @@ DEFAULT_UPSTREAM_QUERY_URL = (
     "&version=0.0.1"
     "&platform=linux"
     "&arch=x64"
-    "&channel=nightly"
+    "&channel=stable"
 )
 
 
