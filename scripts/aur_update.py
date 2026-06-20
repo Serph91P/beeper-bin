@@ -60,6 +60,20 @@ class PushResult:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class AppImageLayoutInspection:
+    root: Path
+    layout: str
+    requires_asar_makedepend: bool
+    register_linux_config_targets: tuple[str, ...]
+    desktop_registration_targets: tuple[str, ...]
+
+
+REGISTER_LINUX_CONFIG_EXPORT_RE = re.compile(r"export\{[a-zA-Z0-9_]+ as registerLinuxConfig\};")
+DESKTOP_REGISTRATION_RE = re.compile(r"desktop-file-install|xdg-mime|\.desktop")
+JS_RESOURCE_SUFFIXES = {".js", ".mjs", ".cjs"}
+
+
 def _to_path(value: str | None) -> Path:
     if not value:
         raise ValueError("path is empty")
@@ -112,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Only report planned changes without writing files",
+    )
+    parser.add_argument(
+        "--skip-appimage-inspection",
+        action="store_true",
+        default=os.getenv("SKIP_APPIMAGE_INSPECTION", "").lower() in {"1", "true", "yes"},
+        help="Skip upstream AppImage extraction and desktop-registration layout validation",
     )
     parser.add_argument(
         "--json",
@@ -237,6 +257,177 @@ def _hash_streamed(url: str, timeout: int = 30) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _download_file(url: str, destination: Path, timeout: int = 30) -> str:
+    """Download an upstream artifact to destination and return its sha256."""
+    h = sha256()
+    request = Request(url, headers={"User-Agent": UA}, method="GET")
+    with urlopen(request, timeout=timeout) as response, destination.open("wb") as out:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+            out.write(chunk)
+    return h.hexdigest()
+
+
+def _source_spec_url(source_spec: str) -> str:
+    """Return the actual URL side of an Arch source spec."""
+    if "::" in source_spec:
+        return source_spec.split("::", 1)[1]
+    return source_spec
+
+
+def _extract_appimage_to_dir(appimage_path: Path, workdir: Path) -> Path:
+    appimage_path.chmod(appimage_path.stat().st_mode | 0o111)
+    result = subprocess.run(
+        [appimage_path.as_posix(), "--appimage-extract"],
+        cwd=workdir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    extracted_root = workdir / "squashfs-root"
+    if result.returncode != 0 or not extracted_root.is_dir():
+        raise RuntimeError(
+            "AppImage extraction failed:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+    return extracted_root
+
+
+def _extract_asar_to_dir(asar_path: Path, destination: Path) -> None:
+    asar = shutil.which("asar")
+    if asar:
+        cmd = [asar, "extract", asar_path.as_posix(), destination.as_posix()]
+    else:
+        npx = shutil.which("npx")
+        if not npx:
+            raise RuntimeError("asar command is required to inspect resources/app.asar")
+        cmd = [npx, "--yes", "@electron/asar", "extract", asar_path.as_posix(), destination.as_posix()]
+    result = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not destination.is_dir():
+        raise RuntimeError(
+            "asar extraction failed:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+
+def _scan_js_targets(search_root: Path, label_base: Path, label_prefix: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
+    register_targets: list[str] = []
+    desktop_targets: list[str] = []
+    for path in sorted(search_root.rglob("*")):
+        if not path.is_file() or path.suffix not in JS_RESOURCE_SUFFIXES:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if label_prefix:
+            label = f"{label_prefix}{path.relative_to(label_base).as_posix()}"
+        else:
+            label = path.relative_to(label_base).as_posix()
+        if REGISTER_LINUX_CONFIG_EXPORT_RE.search(content):
+            register_targets.append(label)
+        if DESKTOP_REGISTRATION_RE.search(content):
+            desktop_targets.append(label)
+    return tuple(register_targets), tuple(desktop_targets)
+
+
+def inspect_extracted_appimage_layout(extracted_root: Path) -> AppImageLayoutInspection:
+    """Inspect an extracted Electron AppImage for Beeper Linux registration code."""
+    resources_dir = extracted_root / "resources"
+    if not resources_dir.is_dir():
+        raise RuntimeError(f"AppImage resources directory not found: {resources_dir}")
+
+    app_dir = resources_dir / "app"
+    app_asar = resources_dir / "app.asar"
+    register_targets: list[str] = []
+    desktop_targets: list[str] = []
+    layout_parts: list[str] = []
+
+    if app_dir.is_dir():
+        layout_parts.append("resources/app")
+        reg, desk = _scan_js_targets(app_dir, extracted_root)
+        register_targets.extend(reg)
+        desktop_targets.extend(desk)
+
+    requires_asar = app_asar.is_file()
+    if requires_asar:
+        layout_parts.append("resources/app.asar")
+        with tempfile.TemporaryDirectory(prefix="beeper-asar-inspect-") as tmp:
+            asar_app_dir = Path(tmp) / "app"
+            _extract_asar_to_dir(app_asar, asar_app_dir)
+            reg, desk = _scan_js_targets(asar_app_dir, asar_app_dir, "resources/app.asar:")
+            register_targets.extend(reg)
+            desktop_targets.extend(desk)
+
+    return AppImageLayoutInspection(
+        root=extracted_root,
+        layout="+".join(layout_parts) if layout_parts else "unknown",
+        requires_asar_makedepend=requires_asar,
+        register_linux_config_targets=tuple(register_targets),
+        desktop_registration_targets=tuple(desktop_targets),
+    )
+
+
+def _pkgbuild_array_contains(pkgbuild_path: Path, field: str, token: str) -> bool:
+    lines = _read_text(pkgbuild_path).splitlines(keepends=True)
+    try:
+        tokens, _, _ = _extract_array(lines, field)
+    except ValueError:
+        return False
+    return token in tokens
+
+
+def validate_appimage_layout(extracted_root: Path, pkgbuild_path: Path) -> AppImageLayoutInspection:
+    """Fail closed unless the package can patch exactly one Linux registration target."""
+    inspection = inspect_extracted_appimage_layout(extracted_root)
+    if inspection.requires_asar_makedepend and not _pkgbuild_array_contains(pkgbuild_path, "makedepends", "asar"):
+        raise RuntimeError("PKGBUILD makedepends must include asar for resources/app.asar layouts")
+
+    target_count = len(inspection.register_linux_config_targets)
+    if target_count == 0:
+        raise RuntimeError(f"registerLinuxConfig target not found in AppImage layout {inspection.layout}")
+    if target_count > 1:
+        targets = ", ".join(inspection.register_linux_config_targets)
+        raise RuntimeError(f"multiple registerLinuxConfig targets found: {targets}")
+    return inspection
+
+
+def inspect_upstream_appimage_source(source_spec: str, pkgbuild_path: Path, timeout: int = 30) -> AppImageLayoutInspection:
+    """Download, extract, and validate a Beeper AppImage before updating package metadata."""
+    source_url = _source_spec_url(source_spec)
+    with tempfile.TemporaryDirectory(prefix="beeper-appimage-inspect-") as tmp:
+        tempdir = Path(tmp)
+        appimage_path = tempdir / "upstream.AppImage"
+        _download_file(source_url, appimage_path, timeout=timeout)
+        extracted_root = _extract_appimage_to_dir(appimage_path, tempdir)
+        return validate_appimage_layout(extracted_root, pkgbuild_path)
+
+
+def _pkgbuild_needs_update(pkgbuild_path: Path, new_pkgver: str, new_source: str, new_sha256: str) -> bool:
+    lines = _read_text(pkgbuild_path).splitlines(keepends=True)
+    current_pkgver = _extract_field(lines, "pkgver")
+    try:
+        current_source, _, _ = _extract_array(lines, "source")
+        current_sha, _, _ = _extract_array(lines, "sha256sums")
+    except ValueError:
+        return True
+    return (
+        current_pkgver != new_pkgver
+        or not current_source
+        or current_source[0] != new_source
+        or not current_sha
+        or current_sha[0] != new_sha256
+    )
 
 
 def _extract_field(lines: list[str], field: str) -> str | None:
@@ -544,6 +735,10 @@ def run(args: argparse.Namespace) -> tuple[UpdateResult, PushResult | None]:
         args.version_regex,
         args.timeout,
     )
+
+    needs_update = _pkgbuild_needs_update(pkgbuild_path, upstream_pkgver, source_url, checksum)
+    if needs_update and not getattr(args, "skip_appimage_inspection", False):
+        inspect_upstream_appimage_source(source_url, pkgbuild_path, args.timeout)
 
     result = update_pkgbuild(pkgbuild_path, upstream_pkgver, source_url, checksum, args.dry_run)
 
