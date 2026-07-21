@@ -1,4 +1,4 @@
-# Beeper v4 AUR auto updater
+# Beeper AUR auto updater
 
 This repository maintains Arch User Repository package templates for the Beeper v4 desktop AppImage.
 
