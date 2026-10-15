@@ -13,16 +13,18 @@ depends=('libappindicator' 'libnotify' 'libsecret' 'hicolor-icon-theme')
 makedepends=('asar')
 url='https://www.beeper.com/beta'
 license=('LicenseRef-beeper')
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 options=('!strip' '!debug')
 conflicts=('beeper' 'beeper-v4-bin')
 provides=('beeper')
 
-source=('Beeper-4.3.176-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-4.3.176-x86_64.AppImage')
-sha256sums=('dc6c637f6a66922c8a31bc95feffb89b37be1b53f2218caf8be9a7af1b999a98')
+source_x86_64=('Beeper-4.3.176-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-4.3.176-x86_64.AppImage')
+source_aarch64=('Beeper-4.3.176-aarch64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-4.3.176-arm64.AppImage')
+sha256sums_x86_64=('dc6c637f6a66922c8a31bc95feffb89b37be1b53f2218caf8be9a7af1b999a98')
+sha256sums_aarch64=('2802cb3cbf5f4312e97700f5a5fbec1fc5e789bbbcb4de62396c6e88d7ea1e8e')
 
 build() {
-  local _filename="Beeper-${pkgver}-x86_64.AppImage"
+  local _filename="Beeper-${pkgver}-${CARCH}.AppImage"
 
   chmod +x "$srcdir/$_filename"
   "$srcdir/$_filename" --appimage-extract
