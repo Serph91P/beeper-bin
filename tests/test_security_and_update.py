@@ -235,6 +235,124 @@ class AppImageLayoutInspectionTests(unittest.TestCase):
         self.assertEqual(inspected[0][0], "Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2.AppImage")
 
 
+class MultiArchUpdateTests(unittest.TestCase):
+    PKGBUILD = (
+        "pkgname='beeper-bin'\n"
+        "pkgver=1\n"
+        "arch=('x86_64' 'aarch64')\n"
+        "makedepends=('asar')\n"
+        "source_x86_64=('Beeper-1-x86_64.AppImage::https://example.invalid/Beeper-1-x86_64.AppImage')\n"
+        "source_aarch64=('Beeper-1-aarch64.AppImage::https://example.invalid/Beeper-1-arm64.AppImage')\n"
+        "sha256sums_x86_64=('0')\n"
+        "sha256sums_aarch64=('0')\n"
+        "\n"
+        "build() {\n"
+        "  local _filename=\"Beeper-${pkgver}-${CARCH}.AppImage\"\n"
+        "}\n"
+    )
+
+    def args(self, package_dir: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            package_name="beeper-bin",
+            package_dir=package_dir.as_posix(),
+            query_url="https://example.invalid/feed.json?arch=x64",
+            version_regex=r"Beeper-(?P<version>[0-9.]+)",
+            srcinfo_command="makepkg",
+            dry_run=False,
+            json=False,
+            push=False,
+            no_push=False,
+            push_ssh_key="",
+            ssh_known_hosts="",
+            aur_remote_template="ssh://aur@aur.archlinux.org/{package}.git",
+            timeout=7,
+            commit_email="actions@github.com",
+            commit_name="AUR Update Bot",
+            skip_appimage_inspection=False,
+        )
+
+    def run_update(self, upstream: dict[str, tuple[str, str, str]]):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tmp_path = Path(tmp.name)
+        pkgbuild = tmp_path / "PKGBUILD"
+        pkgbuild.write_text(self.PKGBUILD, encoding="utf-8")
+        inspected = []
+
+        old_detect = aur_update.detect_upstream
+        old_inspect = aur_update.inspect_upstream_appimage_source
+        old_generate = aur_update.generate_srcinfo
+        try:
+            aur_update.detect_upstream = lambda query_url, regex, timeout, arch="x86_64": upstream[arch]
+            aur_update.inspect_upstream_appimage_source = (
+                lambda source_spec, pkgbuild_path, timeout: inspected.append(source_spec)
+            )
+            aur_update.generate_srcinfo = lambda package_dir, srcinfo_command, dry_run: True
+            result, _ = aur_update.run(self.args(tmp_path))
+        finally:
+            aur_update.detect_upstream = old_detect
+            aur_update.inspect_upstream_appimage_source = old_inspect
+            aur_update.generate_srcinfo = old_generate
+        return result, pkgbuild.read_text(encoding="utf-8"), inspected
+
+    def test_package_arches_reads_per_arch_pkgbuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkgbuild = Path(tmp) / "PKGBUILD"
+            pkgbuild.write_text(self.PKGBUILD, encoding="utf-8")
+
+            self.assertEqual(aur_update.package_arches(pkgbuild), ("x86_64", "aarch64"))
+
+    def test_package_arches_is_none_for_single_source_pkgbuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkgbuild = Path(tmp) / "PKGBUILD"
+            pkgbuild.write_text("pkgver=1\narch=('x86_64')\nsource=('a')\nsha256sums=('0')\n", encoding="utf-8")
+
+            self.assertIsNone(aur_update.package_arches(pkgbuild))
+
+    def test_run_updates_every_architecture(self):
+        result, pkgbuild, inspected = self.run_update(
+            {
+                "x86_64": ("2", "Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2-x86_64.AppImage", "x1"),
+                "aarch64": ("2", "Beeper-2-aarch64.AppImage::https://example.invalid/Beeper-2-arm64.AppImage", "a1"),
+            }
+        )
+
+        self.assertTrue(result.changed)
+        self.assertIn("pkgver=2\n", pkgbuild)
+        self.assertIn(
+            "source_x86_64=('Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2-x86_64.AppImage')\n",
+            pkgbuild,
+        )
+        self.assertIn(
+            "source_aarch64=('Beeper-2-aarch64.AppImage::https://example.invalid/Beeper-2-arm64.AppImage')\n",
+            pkgbuild,
+        )
+        self.assertIn("sha256sums_x86_64=('x1')\n", pkgbuild)
+        self.assertIn("sha256sums_aarch64=('a1')\n", pkgbuild)
+        self.assertNotIn("\nsource=(", pkgbuild)
+        self.assertEqual(inspected, ["Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2-x86_64.AppImage"])
+
+    def test_run_updates_when_only_one_architecture_checksum_changes(self):
+        result, pkgbuild, _ = self.run_update(
+            {
+                "x86_64": ("1", "Beeper-1-x86_64.AppImage::https://example.invalid/Beeper-1-x86_64.AppImage", "0"),
+                "aarch64": ("1", "Beeper-1-aarch64.AppImage::https://example.invalid/Beeper-1-arm64.AppImage", "a2"),
+            }
+        )
+
+        self.assertTrue(result.changed)
+        self.assertIn("sha256sums_aarch64=('a2')\n", pkgbuild)
+
+    def test_run_fails_when_architectures_have_different_versions(self):
+        with self.assertRaisesRegex(RuntimeError, "aarch64 version 1 differs"):
+            self.run_update(
+                {
+                    "x86_64": ("2", "Beeper-2-x86_64.AppImage::https://example.invalid/Beeper-2-x86_64.AppImage", "x1"),
+                    "aarch64": ("1", "Beeper-1-aarch64.AppImage::https://example.invalid/Beeper-1-arm64.AppImage", "0"),
+                }
+            )
+
+
 class UpdateParsingTests(unittest.TestCase):
     def test_replace_array_preserves_single_quoted_pkgbuild_style(self):
         lines = ["source=('old')\n", "sha256sums=('0')\n"]
@@ -273,6 +391,61 @@ class UpdateParsingTests(unittest.TestCase):
         self.assertEqual(pkgver, "4.2.908")
         self.assertEqual(source, "Beeper-4.2.908-x86_64.AppImage::https://beeper-desktop.download.beeper.com/builds/Beeper-4.2.908-x86_64.AppImage")
         self.assertEqual(sha256, "b2aa")
+
+    def test_query_url_for_arch_switches_update_feed_arch_parameter(self):
+        feed_url = (
+            "https://api.beeper.com/desktop/update-feed.json"
+            "?bundleID=com.automattic.beeper.desktop&version=0.0.1&platform=linux&arch=x64&channel=stable"
+        )
+
+        self.assertEqual(aur_update._query_url_for_arch(feed_url, "x86_64"), feed_url)
+        self.assertEqual(
+            aur_update._query_url_for_arch(feed_url, "aarch64"),
+            feed_url.replace("arch=x64", "arch=arm64"),
+        )
+
+    def test_query_url_for_arch_switches_download_endpoint_path(self):
+        download_url = "https://api.beeper.com/desktop/download/linux/x64/stable/com.automattic.beeper.desktop"
+
+        self.assertEqual(
+            aur_update._query_url_for_arch(download_url, "aarch64"),
+            "https://api.beeper.com/desktop/download/linux/arm64/stable/com.automattic.beeper.desktop",
+        )
+
+    def test_query_url_for_arch_rejects_url_without_architecture(self):
+        with self.assertRaisesRegex(ValueError, "Cannot derive"):
+            aur_update._query_url_for_arch("https://example.invalid/latest", "aarch64")
+
+    def test_detect_upstream_names_source_after_arch(self):
+        payload = {
+            "version": "4.3.209",
+            "url": "https://beeper-desktop.download.beeper.com/builds/Beeper-4.3.209-arm64.AppImage",
+        }
+        requested = []
+
+        def fake_feed(url, timeout):
+            requested.append(url)
+            return payload
+
+        old_feed = aur_update._fetch_update_feed
+        old_hash = aur_update._hash_streamed
+        try:
+            aur_update._fetch_update_feed = fake_feed
+            aur_update._hash_streamed = lambda url, timeout: "a1"
+            pkgver, source, sha256 = aur_update.detect_upstream(
+                "https://api.beeper.com/desktop/update-feed.json?platform=linux&arch=x64",
+                r"Beeper-(?P<version>[0-9.]+)",
+                30,
+                "aarch64",
+            )
+        finally:
+            aur_update._fetch_update_feed = old_feed
+            aur_update._hash_streamed = old_hash
+
+        self.assertEqual(requested, ["https://api.beeper.com/desktop/update-feed.json?platform=linux&arch=arm64"])
+        self.assertEqual(pkgver, "4.3.209")
+        self.assertEqual(source, f"Beeper-4.3.209-aarch64.AppImage::{payload['url']}")
+        self.assertEqual(sha256, "a1")
 
     def test_publish_no_changes_returns_success_exit_code(self):
         self.assertEqual(publish_aur.exit_code_for_result({"pushed": False, "reason": "No local changes for AUR package"}), 0)

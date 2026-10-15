@@ -23,6 +23,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -37,6 +38,10 @@ DEFAULT_UPSTREAM_QUERY_URL = (
 
 
 UA = "beeper-aur-auto-updater/1.0"
+
+# Arch Linux CARCH to the architecture name Beeper uses in its feed and download URLs.
+BEEPER_ARCHES = {"x86_64": "x64", "aarch64": "arm64"}
+PRIMARY_ARCH = "x86_64"
 
 
 @dataclass
@@ -234,8 +239,26 @@ def _fetch_update_feed(url: str, timeout: int = 30) -> dict[str, object] | None:
     return payload
 
 
-def _canonical_appimage_name(pkgver: str) -> str:
-    return f"Beeper-{pkgver}-x86_64.AppImage"
+def _canonical_appimage_name(pkgver: str, arch: str = PRIMARY_ARCH) -> str:
+    return f"Beeper-{pkgver}-{arch}.AppImage"
+
+
+def _query_url_for_arch(query_url: str, arch: str) -> str:
+    """Point an x64 update-feed or download URL at the Beeper build for arch."""
+    if arch == PRIMARY_ARCH:
+        return query_url
+    beeper_arch = BEEPER_ARCHES.get(arch)
+    if not beeper_arch:
+        raise ValueError(f"Unsupported architecture: {arch}")
+    parts = urlsplit(query_url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if any(key == "arch" for key, _ in query):
+        query = [(key, beeper_arch if key == "arch" else value) for key, value in query]
+        return urlunsplit(parts._replace(query=urlencode(query)))
+    path = re.sub(r"/x64(?=/|$)", f"/{beeper_arch}", parts.path)
+    if path == parts.path:
+        raise ValueError(f"Cannot derive the {arch} URL from {query_url}")
+    return urlunsplit(parts._replace(path=path))
 
 
 def _extract_version_from_url(url: str, version_regex: str) -> str:
@@ -413,12 +436,40 @@ def inspect_upstream_appimage_source(source_spec: str, pkgbuild_path: Path, time
         return validate_appimage_layout(extracted_root, pkgbuild_path)
 
 
-def _pkgbuild_needs_update(pkgbuild_path: Path, new_pkgver: str, new_source: str, new_sha256: str) -> bool:
+def _source_fields(arch: str | None) -> tuple[str, str]:
+    """Return the source and checksum array names, per architecture when arch is set."""
+    if arch is None:
+        return "source", "sha256sums"
+    return f"source_{arch}", f"sha256sums_{arch}"
+
+
+def package_arches(pkgbuild_path: Path) -> tuple[str, ...] | None:
+    """Return the PKGBUILD architectures when it has per-architecture sources, else None."""
+    lines = _read_text(pkgbuild_path).splitlines(keepends=True)
+    try:
+        _extract_array(lines, f"source_{PRIMARY_ARCH}")
+        arches, _, _ = _extract_array(lines, "arch")
+    except ValueError:
+        return None
+    unsupported = [arch for arch in arches if arch not in BEEPER_ARCHES]
+    if unsupported:
+        raise RuntimeError(f"PKGBUILD lists architectures without a Beeper build: {', '.join(unsupported)}")
+    return tuple(arches)
+
+
+def _pkgbuild_needs_update(
+    pkgbuild_path: Path,
+    new_pkgver: str,
+    new_source: str,
+    new_sha256: str,
+    arch: str | None = None,
+) -> bool:
     lines = _read_text(pkgbuild_path).splitlines(keepends=True)
     current_pkgver = _extract_field(lines, "pkgver")
+    source_field, sha_field = _source_fields(arch)
     try:
-        current_source, _, _ = _extract_array(lines, "source")
-        current_sha, _, _ = _extract_array(lines, "sha256sums")
+        current_source, _, _ = _extract_array(lines, source_field)
+        current_sha, _, _ = _extract_array(lines, sha_field)
     except ValueError:
         return True
     return (
@@ -522,20 +573,36 @@ def update_pkgbuild(
     new_source: str,
     new_sha256: str,
     dry_run: bool,
+    other_arch_sources: dict[str, tuple[str, str]] | None = None,
 ) -> UpdateResult:
+    """Update pkgver and the sources.
+
+    Without other_arch_sources the plain source and sha256sums arrays are updated.
+    With it, new_source and new_sha256 go to the x86_64 arrays and every other
+    architecture's (source, sha256) pair to its own arrays.
+    """
     content = _read_text(pkgbuild_path)
     lines = content.splitlines(keepends=True)
-    old_pkgver, old_source_text, old_sha = _extract_field(lines, "pkgver"), _extract_field(lines, "source"), _extract_field(lines, "sha256sums")
+    old_pkgver = _extract_field(lines, "pkgver")
 
     changed_pkgver, old_pkgver_value = _replace_scalar(lines, "pkgver", new_pkgver)
 
-    changed_source, old_source_tokens = _replace_array_first(lines, "source", new_source)
+    primary_arch = None if other_arch_sources is None else PRIMARY_ARCH
+    source_field, sha_field = _source_fields(primary_arch)
+
+    changed_source, old_source_tokens = _replace_array_first(lines, source_field, new_source)
     old_source = old_source_tokens[0] if old_source_tokens else None
 
-    changed_sha, old_sha_tokens = _replace_array_first(lines, "sha256sums", new_sha256)
+    changed_sha, old_sha_tokens = _replace_array_first(lines, sha_field, new_sha256)
     old_sha_value = old_sha_tokens[0] if old_sha_tokens else None
 
     changed = changed_pkgver or changed_source or changed_sha
+
+    for arch, (arch_source, arch_sha256) in (other_arch_sources or {}).items():
+        arch_source_field, arch_sha_field = _source_fields(arch)
+        changed_arch_source, _ = _replace_array_first(lines, arch_source_field, arch_source)
+        changed_arch_sha, _ = _replace_array_first(lines, arch_sha_field, arch_sha256)
+        changed = changed or changed_arch_source or changed_arch_sha
 
     if changed and not dry_run:
         _write_text(pkgbuild_path, "".join(lines))
@@ -593,8 +660,10 @@ def detect_upstream(
     query_url: str,
     regex: str,
     timeout: int,
+    arch: str = PRIMARY_ARCH,
 ) -> tuple[str, str, str]:
-    """Return (pkgver, source_spec, sha256)."""
+    """Return (pkgver, source_spec, sha256) for the Beeper build for arch."""
+    query_url = _query_url_for_arch(query_url, arch)
     update_feed = _fetch_update_feed(query_url, timeout)
     if update_feed:
         pkgver = str(update_feed["version"])
@@ -603,7 +672,7 @@ def detect_upstream(
         pkgver, source_url = _detect_upstream(query_url, regex, timeout)
 
     sha256sum = _hash_streamed(source_url, timeout=timeout)
-    filename = _canonical_appimage_name(pkgver)
+    filename = _canonical_appimage_name(pkgver, arch)
     return pkgver, f"{filename}::{source_url}", sha256sum
 
 
@@ -730,17 +799,56 @@ def run(args: argparse.Namespace) -> tuple[UpdateResult, PushResult | None]:
     pkgbuild_path, srcinfo_path = resolve_paths(args)
     package_dir = pkgbuild_path.parent
 
+    arches = package_arches(pkgbuild_path)
+
     upstream_pkgver, source_url, checksum = detect_upstream(
         args.query_url,
         args.version_regex,
         args.timeout,
     )
+    needs_update = _pkgbuild_needs_update(
+        pkgbuild_path,
+        upstream_pkgver,
+        source_url,
+        checksum,
+        PRIMARY_ARCH if arches is not None else None,
+    )
 
-    needs_update = _pkgbuild_needs_update(pkgbuild_path, upstream_pkgver, source_url, checksum)
+    other_arch_sources = None
+    if arches is not None:
+        other_arch_sources = {}
+        for arch in arches:
+            if arch == PRIMARY_ARCH:
+                continue
+            arch_pkgver, arch_source, arch_checksum = detect_upstream(
+                args.query_url,
+                args.version_regex,
+                args.timeout,
+                arch,
+            )
+            # Beeper can publish one architecture before the other; wait for both.
+            if arch_pkgver != upstream_pkgver:
+                raise RuntimeError(
+                    f"Upstream {arch} version {arch_pkgver} differs from {PRIMARY_ARCH} version {upstream_pkgver}"
+                )
+            other_arch_sources[arch] = (arch_source, arch_checksum)
+            needs_update = needs_update or _pkgbuild_needs_update(
+                pkgbuild_path, upstream_pkgver, arch_source, arch_checksum, arch
+            )
+
+    # Only the x86_64 AppImage is inspected: extracting runs the AppImage, which the
+    # x86_64 runner cannot do for other architectures. Beeper builds them from the same app.
     if needs_update and not getattr(args, "skip_appimage_inspection", False):
         inspect_upstream_appimage_source(source_url, pkgbuild_path, args.timeout)
 
-    result = update_pkgbuild(pkgbuild_path, upstream_pkgver, source_url, checksum, args.dry_run)
+    result = update_pkgbuild(
+        pkgbuild_path,
+        upstream_pkgver,
+        source_url,
+        checksum,
+        args.dry_run,
+        other_arch_sources,
+    )
 
     if result.changed and not args.dry_run:
         result.srcinfo_generated = generate_srcinfo(package_dir, args.srcinfo_command, args.dry_run)
